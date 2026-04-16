@@ -1,16 +1,27 @@
+import os
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+
 import streamlit as st
 import streamlit.components.v1 as components
 import yfinance as yf
 import pandas as pd
 import numpy as np
-from sklearn.linear_model import LinearRegression
 from sklearn.ensemble import RandomForestRegressor
+from sklearn.preprocessing import MinMaxScaler
 from xgboost import XGBRegressor
+from statsmodels.tsa.arima.model import ARIMA
+import tensorflow as tf
+from tf_keras.models import Sequential
+from tf_keras.layers import LSTM, Dense, Dropout
 import plotly.express as px
 import plotly.graph_objects as go
 import warnings
+from statsmodels.stats.weightstats import ztest
+from sklearn.metrics import mean_absolute_error, mean_squared_error
+from sklearn.model_selection import train_test_split
 
 warnings.filterwarnings('ignore')
+tf.get_logger().setLevel('ERROR')
 
 # Set page configuration
 st.set_page_config(page_title="Pro Stock Engine", page_icon="⚡", layout="wide", initial_sidebar_state="expanded")
@@ -133,15 +144,15 @@ with st.sidebar:
     """, unsafe_allow_html=True)
 
     st.markdown("<p style='font-size: 11px; font-weight: 700; color: #777; letter-spacing: 1px;'>🧭 SYSTEM MODULES</p>", unsafe_allow_html=True)
-    app_mode = st.radio("MENU:", ["🔍 User Prediction", "📊 Advanced Dashboard", "📉 Graphs & Analysis", "📈 Live Trading Terminal"], label_visibility="collapsed")
+    app_mode = st.radio("MENU:", ["🔍 User Prediction", "📊 Advanced Dashboard", "📉 Graphs & Analysis", "🧠 Model Analytics", "📈 Live Trading Terminal"], label_visibility="collapsed")
 
     st.markdown("<br><br><p style='font-size: 11px; font-weight: 700; color: #777; letter-spacing: 1px;'>⚙️ SERVER STATUS</p>", unsafe_allow_html=True)
     st.success("✅ Main Engine : **ONLINE**\n\n✅ Data Node : **SYNCED**\n\n🔗 Market : **GLOBAL**")
 
     st.markdown("""
     <div style="margin-top: 30px; text-align: center; color: #888; font-size: 12px; padding: 15px; border-radius: 8px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05);">
-        <strong style='color: #ddd;'>Ensemble ML Model v2.4</strong><br>
-        <span style='font-size: 11px;'>LinearReg × RanForest × XGBoost</span><br><br>
+        <strong style='color: #ddd;'>Ensemble ML Model v3.0</strong><br>
+        <span style='font-size: 11px;'>LSTM × ARIMA × RandForest × XGBoost</span><br><br>
         <div style='display:inline-block; width:8px; height:8px; background-color:#4CAF50; border-radius:50%; margin-right:5px;'></div><i>System Active</i>
     </div>
     """, unsafe_allow_html=True)
@@ -178,78 +189,176 @@ def fetch_data(ticker, period="1y"):
     except Exception as e:
         return pd.DataFrame()
 
+# ─────────────────────────────────────────────
+# HELPER: Build & train LSTM model
+# ─────────────────────────────────────────────
+LOOKBACK = 60
+
+def _build_lstm_prediction(close_prices):
+    """Scales data, trains LSTM, returns (model, scaler, last_sequence)."""
+    scaler = MinMaxScaler(feature_range=(0, 1))
+    scaled = scaler.fit_transform(close_prices.reshape(-1, 1))
+
+    X_seq, y_seq = [], []
+    for i in range(LOOKBACK, len(scaled)):
+        X_seq.append(scaled[i - LOOKBACK:i, 0])
+        y_seq.append(scaled[i, 0])
+    X_seq = np.array(X_seq).reshape(-1, LOOKBACK, 1)
+    y_seq = np.array(y_seq)
+
+    model = Sequential([
+        LSTM(50, return_sequences=False, input_shape=(LOOKBACK, 1)),
+        Dropout(0.2),
+        Dense(1)
+    ])
+    model.compile(optimizer='adam', loss='mse')
+    model.fit(X_seq, y_seq, epochs=10, batch_size=32, verbose=0)
+
+    last_seq = scaled[-LOOKBACK:].reshape(1, LOOKBACK, 1)
+    return model, scaler, last_seq, scaled
+
+def _arima_forecast(close_prices, steps=1):
+    """Fits ARIMA(5,1,0) and returns a 1-d numpy array of forecasted values."""
+    try:
+        model = ARIMA(close_prices, order=(5, 1, 0))
+        result = model.fit()
+        return result.forecast(steps=steps)
+    except Exception:
+        # Fallback: repeat last known price
+        return np.array([close_prices[-1]] * steps)
+
+# ─────────────────────────────────────────────
+# CORE: Next-day prediction ensemble
+# ─────────────────────────────────────────────
 @st.cache_data(ttl=3600)
 def predict_stock_from_df(df, ticker):
-    if df.empty or len(df) < 60: return None, None, None, None, "Insufficient Data"
-    df['Target'] = df['Close'].shift(-1)
-    train_df = df.dropna().copy()
-    if len(train_df) < 10: return None, None, None, None, "Insufficient Data"
-    X = train_df[['Close', 'MA10', 'MA50']]
-    y = train_df['Target']
-    lr = LinearRegression()
-    rf = RandomForestRegressor(n_estimators=50, random_state=42, n_jobs=1)
-    xgb = XGBRegressor(n_estimators=50, learning_rate=0.1, random_state=42, n_jobs=1)
-    lr.fit(X, y)
-    rf.fit(X, y)
-    xgb.fit(X.values, y.values)
-    pred_y_lr = lr.predict(X)
-    pred_y_rf = rf.predict(X)
-    pred_y_xgb = xgb.predict(X.values)
-    ensemble_preds = (pred_y_lr * 0.4) + (pred_y_rf * 0.3) + (pred_y_xgb * 0.3)
-    actual_direction = (y - train_df['Close']) > 0
-    pred_direction = (ensemble_preds - train_df['Close']) > 0
-    accuracy_pct = (actual_direction == pred_direction).mean() * 100
+    if df.empty or len(df) < 60:
+        return None, None, None, None, "Insufficient Data"
+
+    close_prices = df['Close'].values.astype(float)
+
+    # ── LSTM ──────────────────────────────────
+    lstm_model, scaler, last_seq, scaled = _build_lstm_prediction(close_prices)
+    pred_lstm_scaled = lstm_model.predict(last_seq, verbose=0)[0][0]
+    pred_lstm = float(scaler.inverse_transform([[pred_lstm_scaled]])[0][0])
+
+    # ── ARIMA ─────────────────────────────────
+    pred_arima = float(_arima_forecast(close_prices, steps=1)[0])
+
+    # ── Random Forest & XGBoost (tabular) ─────
+    df_tab = df.copy()
+    df_tab['Target'] = df_tab['Close'].shift(-1)
+    train_df = df_tab.dropna().copy()
+    if len(train_df) < 10:
+        return None, None, None, None, "Insufficient Data"
+
+    X_tab = train_df[['Close', 'MA10', 'MA50']]
+    y_tab = train_df['Target']
+
+    rf = RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=-1)
+    xgb = XGBRegressor(n_estimators=100, learning_rate=0.05, random_state=42, n_jobs=-1, verbosity=0)
+    rf.fit(X_tab, y_tab)
+    xgb.fit(X_tab.values, y_tab.values)
+
     last_row = df.iloc[[-1]][['Close', 'MA10', 'MA50']]
-    pred_lr = lr.predict(last_row)[0]
-    pred_rf = rf.predict(last_row)[0]
-    pred_xgb = xgb.predict(last_row.values)[0]
-    final_pred = (pred_lr * 0.4) + (pred_rf * 0.3) + (pred_xgb * 0.3)
-    try: current_price = float(last_row['Close'].iloc[0])
-    except: current_price = float(last_row['Close'].values[0])
+    pred_rf  = float(rf.predict(last_row)[0])
+    pred_xgb = float(xgb.predict(last_row.values)[0])
+
+    # ── Weighted Ensemble ──────────────────────
+    current_price = float(close_prices[-1])
+    final_pred = (
+        pred_lstm * 0.35 +
+        pred_arima * 0.25 +
+        pred_rf   * 0.25 +
+        pred_xgb  * 0.15
+    )
+
+    # ── Directional Accuracy (tabular proxy) ──
+    pred_y_rf  = rf.predict(X_tab)
+    pred_y_xgb = xgb.predict(X_tab.values)
+    ensemble_tab = (pred_y_rf * 0.5) + (pred_y_xgb * 0.5)
+    actual_dir = (y_tab.values - train_df['Close'].values) > 0
+    pred_dir   = (ensemble_tab - train_df['Close'].values) > 0
+    accuracy_pct = (actual_dir == pred_dir).mean() * 100
+
     change_pct = ((final_pred - current_price) / current_price) * 100
-    if change_pct > 1.0: rec = "BUY"
+    if change_pct > 1.0:   rec = "BUY"
     elif change_pct < -1.0: rec = "SELL"
-    else: rec = "HOLD"
-    origin = get_origin_currency(ticker)
+    else:                   rec = "HOLD"
+
+    origin    = get_origin_currency(ticker)
     curr_conv = convert_val(current_price, origin, target_curr, rates_dict)
-    pred_conv = convert_val(final_pred, origin, target_curr, rates_dict)
+    pred_conv = convert_val(final_pred,    origin, target_curr, rates_dict)
     return curr_conv, pred_conv, change_pct, accuracy_pct, rec
 
+# ─────────────────────────────────────────────
+# CORE: 7-Day autoregressive projection
+# ─────────────────────────────────────────────
 @st.cache_data(ttl=3600)
 def predict_future_7_days(ticker):
     df = fetch_data(ticker, period="1y")
-    if df.empty or len(df) < 60: return []
-    df['Target'] = df['Close'].shift(-1)
-    train_df = df.dropna().copy()
-    if len(train_df) < 10: return []
-    X = train_df[['Close', 'MA10', 'MA50']]
-    y = train_df['Target']
-    
-    lr = LinearRegression()
-    rf = RandomForestRegressor(n_estimators=50, random_state=42, n_jobs=1)
-    xgb = XGBRegressor(n_estimators=50, learning_rate=0.1, random_state=42, n_jobs=1)
-    
-    lr.fit(X, y)
-    rf.fit(X, y)
-    xgb.fit(X.values, y.values)
-    
-    future_data = []
-    last_row = df.iloc[[-1]][['Close', 'MA10', 'MA50']].copy()
-    sim_close = list(df['Close'].values)
-    
-    for _ in range(7):
-        pred_lr = lr.predict(last_row)[0]
-        pred_rf = rf.predict(last_row)[0]
-        pred_xgb = xgb.predict(last_row.values)[0]
-        final_pred = (pred_lr * 0.4) + (pred_rf * 0.3) + (pred_xgb * 0.3)
+    if df.empty or len(df) < 60:
+        return []
+
+    close_prices = df['Close'].values.astype(float)
+
+    # ── LSTM setup ────────────────────────────
+    lstm_model, scaler, _, scaled = _build_lstm_prediction(close_prices)
+    lstm_window = list(scaled[-LOOKBACK:, 0])
+
+    # ── ARIMA: forecast all 7 steps at once ───
+    arima_7 = _arima_forecast(close_prices, steps=7)
+
+    # ── RF & XGBoost setup ────────────────────
+    df_tab = df.copy()
+    df_tab['Target'] = df_tab['Close'].shift(-1)
+    train_df = df_tab.dropna().copy()
+    X_tab = train_df[['Close', 'MA10', 'MA50']]
+    y_tab = train_df['Target']
+
+    rf  = RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=-1)
+    xgb = XGBRegressor(n_estimators=100, learning_rate=0.05, random_state=42, n_jobs=-1, verbosity=0)
+    rf.fit(X_tab, y_tab)
+    xgb.fit(X_tab.values, y_tab.values)
+
+    # ── Autoregressive loop ───────────────────
+    future_data  = []
+    sim_close    = list(close_prices)
+    last_row_tab = df.iloc[[-1]][['Close', 'MA10', 'MA50']].copy()
+
+    for i in range(7):
+        # LSTM step
+        seq_input = np.array(lstm_window[-LOOKBACK:]).reshape(1, LOOKBACK, 1)
+        pred_lstm_s  = lstm_model.predict(seq_input, verbose=0)[0][0]
+        pred_lstm    = float(scaler.inverse_transform([[pred_lstm_s]])[0][0])
+
+        # ARIMA step (pre-computed)
+        pred_arima = float(arima_7[i])
+
+        # RF & XGBoost step
+        pred_rf  = float(rf.predict(last_row_tab)[0])
+        pred_xgb = float(xgb.predict(last_row_tab.values)[0])
+
+        # Weighted ensemble
+        final_pred = (
+            pred_lstm  * 0.35 +
+            pred_arima * 0.25 +
+            pred_rf    * 0.25 +
+            pred_xgb   * 0.15
+        )
         future_data.append(final_pred)
-        
+
+        # ─ Update rolling state ───────────────
         sim_close.append(final_pred)
-        next_ma10 = sum(sim_close[-10:]) / 10
-        next_ma50 = sum(sim_close[-50:]) / 50
-        
-        last_row = pd.DataFrame({'Close': [final_pred], 'MA10': [next_ma10], 'MA50': [next_ma50]})
-        
+        next_ma10 = float(np.mean(sim_close[-10:]))
+        next_ma50 = float(np.mean(sim_close[-50:]))
+
+        # LSTM window: append scaled new price
+        new_scaled = float(scaler.transform([[final_pred]])[0][0])
+        lstm_window.append(new_scaled)
+
+        last_row_tab = pd.DataFrame({'Close': [final_pred], 'MA10': [next_ma10], 'MA50': [next_ma50]})
+
     return future_data
 
 @st.cache_data(ttl=3600)
@@ -258,9 +367,9 @@ def predict_stock(ticker):
     return predict_stock_from_df(df, ticker)
 
 def get_recommendation_color(rec):
-    if rec == "BUY": return "#00E676" # neon green
-    elif rec == "SELL": return "#FF1744" # neon red
-    return "#FFEA00" # neon yellow
+    if rec == "BUY":  return "#00E676"  # neon green
+    elif rec == "SELL": return "#FF1744"  # neon red
+    return "#FFEA00"  # neon yellow
 
 def get_trend_color(trend):
     return "#00E676" if "Up" in trend else "#FF1744"
@@ -548,6 +657,116 @@ elif app_mode == "📉 Graphs & Analysis":
             <p style="color: #666;">Please initialize the <b>Advanced Dashboard</b> module to synthesize system memory before launching Graph configurations.</p>
         </div>
         """, unsafe_allow_html=True)
+
+elif app_mode == "🧠 Model Analytics":
+    st.markdown("<h1 style='color: #eee;'>🧠 Model Analytics & Diagnostics</h1>", unsafe_allow_html=True)
+    st.markdown("<p style='color: #aaa; margin-bottom: 20px;'>Mathematically interrogate the engine's precision through deep statistical regression metrics.</p>", unsafe_allow_html=True)
+    
+    st.markdown("<h3 style='color: #eee;'>Asset Selection</h3>", unsafe_allow_html=True)
+    selected_stock = st.text_input("Enter Asset Ticker (e.g. RELIANCE.NS, TSLA)", value="RELIANCE.NS")
+    
+    if selected_stock:
+        selected_stock = resolve_ticker(selected_stock)
+        with st.spinner(f"Compiling structural matrices for {selected_stock}..."):
+            df = fetch_data(selected_stock, period="2y")
+            
+            if not df.empty and len(df) > 60:
+                origin = get_origin_currency(selected_stock)
+                
+                # Convert base prices to targeted equivalent for metric continuity 
+                df['Close'] = df['Close'].apply(lambda x: convert_val(x, origin, target_curr, rates_dict))
+                df['MA10'] = df['MA10'].apply(lambda x: convert_val(x, origin, target_curr, rates_dict))
+                df['MA50'] = df['MA50'].apply(lambda x: convert_val(x, origin, target_curr, rates_dict))
+                
+                # Calculate Daily Returns natively
+                df['Daily_Return'] = df['Close'].pct_change()
+                df_clean = df.dropna().copy()
+                
+                # --- 1. Z-Test ---
+                st.markdown("---")
+                st.markdown("<h3 style='color: #eee;'>1. Statistical Drift (Z-Test)</h3>", unsafe_allow_html=True)
+                z_stat, p_value = ztest(df_clean['Daily_Return'], value=0)
+                
+                z_col1, z_col2, z_col3 = st.columns(3)
+                z_col1.metric("Z-Statistic", f"{z_stat:.4f}")
+                z_col2.metric("P-Value", f"{p_value:.6f}")
+                
+                if p_value < 0.05:
+                    if z_stat > 0:
+                        msg = "POSITIVE DRIFT (Bullish Bias)"
+                        color = "#00E676"
+                    else:
+                        msg = "NEGATIVE DRIFT (Bearish Bias)"
+                        color = "#FF1744"
+                else:
+                    msg = "RANDOM WALK (No Bias)"
+                    color = "#FFEA00"
+                    
+                z_col3.markdown(f"""
+                <div data-testid="metric-container" style="border-left-color: {color};">
+                    <div style="font-size: 14px; color: #aaa; margin-bottom: 4px;">Market Bias Conclusion</div>
+                    <div style="font-size: 16px; font-weight: 800; color: {color};">{msg}</div>
+                </div>
+                """, unsafe_allow_html=True)
+                
+                st.markdown("<br>", unsafe_allow_html=True)
+                col_hm, col_reg = st.columns([1, 1.2])
+                
+                # --- 2. Heatmap Engine (Plotly Smooth) ---
+                with col_hm:
+                    st.markdown("<h4 style='color: #eee;'>2. Feature Independence Matrix</h4>", unsafe_allow_html=True)
+                    corr_matrix = df_clean[['Close', 'MA10', 'MA50', 'Daily_Return']].corr()
+                    
+                    fig_hm = px.imshow(
+                        corr_matrix, 
+                        text_auto=True, 
+                        color_continuous_scale=['#FF1744', '#1E1E1E', '#00E676'], 
+                        aspect="auto",
+                        template=plotly_theme
+                    )
+                    fig_hm.update_layout(plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", margin=dict(l=0, r=0, t=10, b=0), height=350)
+                    st.plotly_chart(fig_hm, use_container_width=True)
+                    
+                # --- 3. Regression Error ---
+                with col_reg:
+                    st.markdown("<h4 style='color: #eee;'>3. Gradient Tree Regression Plot</h4>", unsafe_allow_html=True)
+                    # Prepare Data for Regression Metric Plot out of original df
+                    df_tab = df_clean.copy()
+                    df_tab['Target'] = df_tab['Close'].shift(-1)
+                    df_tab = df_tab.dropna()
+                    
+                    X_class = df_tab[['Close', 'MA10', 'MA50']]
+                    y_class = df_tab['Target']
+                    
+                    X_train, X_test, y_train, y_test = train_test_split(X_class, y_class, test_size=0.2, shuffle=False)
+                    xgb_eval = XGBRegressor(n_estimators=100, learning_rate=0.05, random_state=42, n_jobs=-1, verbosity=0)
+                    xgb_eval.fit(X_train.values, y_train.values)
+                    y_pred_prices = xgb_eval.predict(X_test.values)
+                    
+                    mae = mean_absolute_error(y_test, y_pred_prices)
+                    rmse = np.sqrt(mean_squared_error(y_test, y_pred_prices))
+                    
+                    fig_scat = px.scatter(
+                        x=y_test, y=y_pred_prices, 
+                        opacity=0.6, 
+                        color_discrete_sequence=['#00B0FF'],
+                        template=plotly_theme,
+                        labels={'x': f'Actual Price ({currency_symbol})', 'y': f'Predicted Price ({currency_symbol})'}
+                    )
+                    
+                    min_val = min(y_test.min(), y_pred_prices.min())
+                    max_val = max(y_test.max(), y_pred_prices.max())
+                    fig_scat.add_shape(type="line", x0=min_val, y0=min_val, x1=max_val, y1=max_val, line=dict(color="#FF1744", width=2, dash="dash"))
+                    
+                    fig_scat.update_layout(plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", margin=dict(l=0, r=0, t=10, b=0), height=300)
+                    st.plotly_chart(fig_scat, use_container_width=True)
+                    
+                    e_col1, e_col2 = st.columns(2)
+                    e_col1.metric("Mean Absolute Error (MAE)", f"{currency_symbol}{mae:.2f}")
+                    e_col2.metric("Root Mean Sq. Error", f"{currency_symbol}{rmse:.2f}")
+
+            else:
+                st.error("Insufficient market data collected to perform Deep Diagnostics.")
 
 elif app_mode == "📈 Live Trading Terminal":
     st.markdown("<h1 style='color: #eee;'>Live Trading Terminal</h1>", unsafe_allow_html=True)

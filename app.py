@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import yfinance as yf
 import pandas as pd
 import numpy as np
@@ -132,7 +133,7 @@ with st.sidebar:
     """, unsafe_allow_html=True)
 
     st.markdown("<p style='font-size: 11px; font-weight: 700; color: #777; letter-spacing: 1px;'>🧭 SYSTEM MODULES</p>", unsafe_allow_html=True)
-    app_mode = st.radio("MENU:", ["🔍 User Prediction", "📊 Advanced Dashboard", "📉 Graphs & Analysis"], label_visibility="collapsed")
+    app_mode = st.radio("MENU:", ["🔍 User Prediction", "📊 Advanced Dashboard", "📉 Graphs & Analysis", "📈 Live Trading Terminal"], label_visibility="collapsed")
 
     st.markdown("<br><br><p style='font-size: 11px; font-weight: 700; color: #777; letter-spacing: 1px;'>⚙️ SERVER STATUS</p>", unsafe_allow_html=True)
     st.success("✅ Main Engine : **ONLINE**\n\n✅ Data Node : **SYNCED**\n\n🔗 Market : **GLOBAL**")
@@ -547,3 +548,34 @@ elif app_mode == "📉 Graphs & Analysis":
             <p style="color: #666;">Please initialize the <b>Advanced Dashboard</b> module to synthesize system memory before launching Graph configurations.</p>
         </div>
         """, unsafe_allow_html=True)
+
+elif app_mode == "📈 Live Trading Terminal":
+    st.markdown("<h1 style='color: #eee;'>Live Trading Terminal</h1>", unsafe_allow_html=True)
+    st.markdown("<p style='color: #aaa; margin-bottom: 20px;'>Real-time advanced charting interface universally powered by TradingView connectivity.</p>", unsafe_allow_html=True)
+    
+    # We inject the provided HTML script securely using Streamlit's native HTML component handler
+    tradingview_html = """
+    <!-- TradingView Widget BEGIN -->
+    <div class="tradingview-widget-container">
+      <div class="tradingview-widget-container__widget"></div>
+      <script type="text/javascript" src="https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js" async>
+      {
+      "width": "100%",
+      "height": 800,
+      "symbol": "NASDAQ:AAPL",
+      "interval": "D",
+      "timezone": "Etc/UTC",
+      "theme": "dark",
+      "style": "1",
+      "locale": "en",
+      "allow_symbol_change": true,
+      "save_image": false,
+      "calendar": false
+    }
+      </script>
+    </div>
+    <!-- TradingView Widget END -->
+    """
+    
+    # Render with absolute height boundaries allowing safe scroll limits
+    components.html(tradingview_html, height=850, scrolling=True)

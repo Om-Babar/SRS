@@ -8,3 +8,4 @@ statsmodels
 tensorflow-cpu==2.17.0
 tf-keras==2.17.0
 plotly
+notebook

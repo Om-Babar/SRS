@@ -71,3 +71,5 @@ docker build -t pro-stock-engine .
 # Ignite the Application
 docker run -p 8501:8501 pro-stock-engine
 ```
+
+docker run -p 8888:8888 -v "d:\SRS:/app" pro-stock-engine python -m notebook --ip=0.0.0.0 --port=8888 --no-browser --allow-root

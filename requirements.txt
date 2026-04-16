@@ -1,0 +1,10 @@
+streamlit
+yfinance
+pandas
+numpy
+scikit-learn
+xgboost
+statsmodels
+tensorflow-cpu==2.17.0
+tf-keras==2.17.0
+plotly

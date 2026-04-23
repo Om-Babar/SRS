@@ -31,6 +31,7 @@ tf.get_logger().setLevel('ERROR')'''),
     
     nbf.v4.new_markdown_cell('## 2. Configuration & Asset Selection\nSet the target stock ticker symbol. You can test with symbols like `AAPL`, `TSLA`, `RELIANCE.NS`, etc.'),
     nbf.v4.new_code_cell('''TARGET_TICKER = "RELIANCE.NS"
+# You can change PERIOD to "6mo", "1y", "2y", "5y", or "max" just like the Dashboard
 PERIOD = "1y"'''),
 
     nbf.v4.new_markdown_cell('## 3. Data Fetching & Preprocessing\nDownload historical stock data from Yahoo Finance and compute the 10-day and 50-day moving averages, simulating market momentum.'),
@@ -178,11 +179,11 @@ print("-" * 32)
 # 3. Interpret the Results at a 95% Confidence Level
 if p_value < 0.05:
     if z_stat > 0:
-        print("💡 Conclusion: Reject the Null Hypothesis.\\nThe stock has a statistically significant positive drift (returns > 0).")
+        print("💡 Conclusion: POSITIVE DRIFT (Bullish)\\nReject the Null Hypothesis. The stock has a statistically significant upward trend. This means the stock's upward movement is not random — there is real buying momentum. AI predictions for this stock carry higher confidence.")
     else:
-        print("💡 Conclusion: Reject the Null Hypothesis.\\nThe stock has a statistically significant negative drift (returns < 0).")
+        print("💡 Conclusion: NEGATIVE DRIFT (Bearish)\\nReject the Null Hypothesis. The stock has a statistically significant downward trend. This means the decline is not random — there is real selling pressure. AI predictions should be treated with caution.")
 else:
-    print("📉 Conclusion: Fail to reject the Null Hypothesis.\\nThere is no statistical proof that the average daily return differs from 0. Movements are likely random noise.")'''),
+    print("📉 Conclusion: RANDOM WALK (No Bias)\\nFail to reject the Null Hypothesis. Price movements are essentially random noise. This means the AI has less directional signal to work with — predictions may be less reliable for this stock.")'''),
     
     nbf.v4.new_markdown_cell('## 10. Education: Correlation Heatmap\nHere we use Seaborn to see how "redundant" our data is. If two variables are highly correlated (dark red), feeding them both to an AI might be useless since they provide the exact same information!'),
     nbf.v4.new_code_cell('''import seaborn as sns
@@ -217,7 +218,13 @@ rmse = np.sqrt(mean_squared_error(y_test, y_pred_prices))
 print("--- Regression Error Metrics ---")
 print(f"Mean Absolute Error (MAE): ₹{mae:.2f}")
 print(f"Root Mean Squared Error:   ₹{rmse:.2f}")
-print("This means our AI is on average off by exactly this dollar amount per prediction.\\n")
+avg_price = y_test.mean()
+mae_pct = (mae / avg_price) * 100
+print(f"\\nThis means our AI is on average off by {mae:.2f} per prediction.")
+if mae_pct < 2.0:
+    print(f"Error is only {mae_pct:.1f}% of the average stock price -> Excellent model quality.")
+else:
+    print(f"Error is {mae_pct:.1f}% of the average stock price -> Moderate/Poor model quality.")
 
 # 2. Scatter Plot: Predicted vs Actual Prices
 plt.figure(figsize=(8, 6))

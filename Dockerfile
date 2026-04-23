@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+FROM tensorflow/tensorflow:latest-gpu
 
 # Set the working directory
 WORKDIR /app
@@ -12,7 +12,7 @@ RUN apt-get update && apt-get install -y \
 COPY requirements.txt .
 
 # Install dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --ignore-installed -r requirements.txt
 
 # Copy the rest of the application
 COPY . .

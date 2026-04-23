@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual Environments
+.env
+.venv/
+venv/
+ENV/
+env/
+
+# Jupyter Notebooks
+.ipynb_checkpoints/
+
+# Streamlit
+.streamlit/
+
+# OS specific files
+.DS_Store
+Thumbs.db
+
+# IDEs
+.vscode/
+.idea/
